@@ -1,0 +1,46 @@
+---
+# Use spaces (with a width of 4) for indentation
+BasedOnStyle: LLVM
+IndentWidth: 2
+UseTab: Never
+TabWidth: 2
+
+# BraceWrapping: Break before braces on function, namespace and class definitions
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: false
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  AfterUnion: false
+  BeforeCatch: false
+  BeforeElse: false
+  IndentBraces: false
+
+# Allow short functions to be on a single line
+AllowShortFunctionsOnASingleLine: All
+
+# Do not align assignments
+AlignConsecutiveAssignments: false
+
+# Pointers alignment: Align to the left (e.g., int *x;)
+PointerAlignment: Left
+
+# Do not align array subscript
+AlignConsecutiveDeclarations: Consecutive
+
+# Indent case labels of switch statements
+IndentCaseLabels: true
+
+# Column limit set to 80
+ColumnLimit: 80
+
+# Penalty for each line break
+PenaltyBreakComment: 300
+
+# Penalty for breaking a function call after each argument
+PenaltyBreakFirstLessLess: 120
+
+# Inheritance alignment: Do not align the colon with anything
+AlignAfterOpenBracket: Align

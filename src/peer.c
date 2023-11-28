@@ -444,10 +444,10 @@ void handle_register(int connfd, char* client_ip, int client_port_int)
       int payload_length      = strlen(reply_payload);
 
       replyHeader.status      = htobe32(2); // 2 - Peer already exists!
-      replyHeader.block_count = 1;
+      replyHeader.block_count = htobe32(1);
       replyHeader.length      = htobe32(payload_length);
       get_data_sha(&reply_payload, replyHeader.block_hash, payload_length, SHA256_HASH_SIZE);
-      replyHeader.this_block = 1;
+      replyHeader.this_block = htobe32(1);
 
       compsys_helper_writen(connfd, &replyHeader,  sizeof(replyHeader));
       compsys_helper_writen(connfd, reply_payload, payload_length);
@@ -521,7 +521,7 @@ void handle_register(int connfd, char* client_ip, int client_port_int)
     for (int i = 0; i < peer_count; ++i) {
       PeerAddress_t* peer = network[i];
 
-      if (strcmp(peer->ip, my_address->ip) == 0 && strcmp(peer->port, my_address->port) == 0 ||
+      if (strcmp(peer->ip, my_address->ip)   == 0 && strcmp(peer->port, my_address->port)   == 0 ||
           strcmp(peer->ip, register_peer.ip) == 0 && strcmp(peer->port, register_peer.port) == 0) {
         continue;
       }
@@ -540,23 +540,131 @@ void handle_register(int connfd, char* client_ip, int client_port_int)
  * never generate a response, even in the case of errors.
  */
 void handle_inform(char* request, int request_len) {
-  // Update network
-  // Do some validation
+  // We recieve a inform message from a peer
+  // Maybe do some validation (check for duplicates or validity of input for example)
+  // We have to update our local network (field)
 
+
+  //request[20] = ip[16] + port[4]
+  char ip[IP_LEN];
+  int32_t port;
+  
+  //port = 0 - 65535 if expressed as int is 4           - NETWORK 
+  //port = 0 - 65535 if expressed as char[] is 5 bytes  - LOCALLY
+
+  //port = 55345 = int
+  //port = ['5', '5', '3', '4', '5'] = char[5] = 5 bytes
+
+  memcpy(ip, request, IP_LEN);
+  memcpy(&port, request + IP_LEN, sizeof(int32_t));
+  
+  //PORT_LEN = 8 but int = 4
+  port = ntohl(port); // Network byte order -> host byte order = big endian -> little endian
+
+  printf("Got inform message from %s:%d\n", ip, port);
+
+  PeerAddress_t* new_peer = malloc(sizeof(PeerAddress_t));
+  memcpy(new_peer->ip, ip, IP_LEN);
+  sprintf(new_peer->port, "%d", port);
+
+
+  if(!is_valid_ip(new_peer->ip) || !is_valid_port(new_peer->port)) {
+    printf("Recieved peer %s:%d has invalid formatting.", new_peer->ip, port);
+    free(new_peer);
+    return;
+  }
+
+  for (size_t i = 0; i < peer_count; i++) {
+    PeerAddress_t* peer = network[i];
+
+    if (strcmp(peer->ip, my_address->ip) == 0 && strcmp(peer->port, my_address->port) == 0) {
+            printf("Recieved peer %s:%d is already registered.", new_peer->ip, port);
+            free(new_peer);
+            return;
+    }
+  }
+
+  peer_count++; 
+  network = realloc(network, sizeof(PeerAddress_t*) * peer_count);
+  network[peer_count - 1] = new_peer;
 }
+
 
 /*
  * Handle 'retrieve' type messages as defined by the assignment text. This will
  * always generate a response
  */
-void handle_retrieve(int connfd, char* request)
+void handle_retrieve(int connfd, char* request, int request_len)
 {
+
     // Your code here. This function has been added as a guide, but feel free
     // to add more, or work in other parts of the code
 
     // Find if we have file on storage
     // If so, upload it
     // If not, respond with bad request
+  /*
+  Retreive, when a peer is requesting a data file to be
+transfered to it from another peer. The request body
+must be the filename/filepath of the requested file
+  */
+
+
+  char* file_name = calloc(request_len + 1, sizeof(char));
+  memcpy(file_name, request, request_len);
+  printf("%s", file_name);
+
+
+  fopen(file_name, "r");
+  if(errno == ENOENT) {
+    // File does not exist
+    printf("File does not exist\n");
+    //TODO: perhaps make this into a handle_error, where we can pass in an error code
+    //handle_unknown(connfd); 
+    return;
+  }
+
+  // Get file size
+  FILE* fp = fopen(file_name, "rb");
+  fseek(fp, 0L, SEEK_END);
+  int file_size = ftell(fp);
+  fseek(fp, 0L, SEEK_SET);
+
+  // Get number of blocks
+  int payload_size = ceilf((float)file_size / (float)(MAX_MSG_LEN - REPLY_HEADER_LEN));
+
+  // Get file hash
+  hashdata_t total_hash;
+  get_file_sha(file_name, total_hash, SHA256_HASH_SIZE);
+
+  // Get file contents
+  char* file_contents = malloc(file_size); //maybe bad in case of the big file? Allocating the whole thing on the heap?... idk
+  fread(file_contents, file_size, 1, fp);
+  fclose(fp);
+
+  for(int i = 0; i < payload_size; i++) {
+    // Get block size
+    int block_size = min(MAX_MSG_LEN - REPLY_HEADER_LEN, file_size - (i * (MAX_MSG_LEN - REPLY_HEADER_LEN)));
+    
+    // Get block hash
+    hashdata_t block_hash;
+    get_data_sha(file_contents + (i * (MAX_MSG_LEN - REPLY_HEADER_LEN)), block_hash, block_size, SHA256_HASH_SIZE);
+    
+    // Get block
+    char* block = malloc(block_size);
+    memcpy(block, file_contents + (i * (MAX_MSG_LEN - REPLY_HEADER_LEN)), block_size);
+    
+    // Send block
+    ReplyHeader_t replyHeader   = {0};
+    replyHeader.status          = htobe32(1); // 1 - OK
+    replyHeader.this_block      = htobe32(i);
+    replyHeader.block_count     = htobe32(payload_size);
+    replyHeader.length          = htobe32(block_size);
+    memcpy(replyHeader.block_hash, block_hash, SHA256_HASH_SIZE);
+    memcpy(replyHeader.total_hash, total_hash, SHA256_HASH_SIZE);
+    
+    compsys_helper_writen(connfd, &replyHeader,  sizeof(replyHeader));
+  }
 }
 
 /*
@@ -565,10 +673,8 @@ void handle_retrieve(int connfd, char* request)
  */
 void handle_server_request(int connfd)
 {
-    // Your code here. This function has been added as a guide, but feel free
-    // to add more, or work in other parts of the code
-
-
+  // Your code here. This function has been added as a guide, but feel free
+  // to add more, or work in other parts of the code
   // Read request from client
   RequestHeader_t request_header = { 0 };
   compsys_helper_readn(connfd, &request_header, sizeof(request_header));
@@ -599,7 +705,7 @@ void handle_server_request(int connfd)
     break;
   case COMMAND_RETREIVE:
     printf("Got retrieve request\n");
-    handle_retrieve(connfd, request_body);
+    handle_retrieve(connfd, request_body, request_length);
     break;
   default:
     printf("Got unknown request\n");
@@ -610,14 +716,14 @@ void handle_server_request(int connfd)
 
 void handle_unknown(int connfd) {
   ReplyHeader_t replyHeader = { 0 };
-  char* reply_payload     = strdup("Unknown command!");
-  int payload_length      = strlen(reply_payload);
+  char* reply_payload       = strdup("Unknown command!");
+  int payload_length        = strlen(reply_payload);
 
-  replyHeader.status      = htobe32(4); // 4 - other error
-  replyHeader.block_count = 0;
-  replyHeader.length      = htobe32(payload_length);
+  replyHeader.status        = htobe32(4); // 4 - other error
+  replyHeader.block_count   = htobe32(1);
+  replyHeader.length        = htobe32(payload_length);
   get_data_sha(reply_payload, replyHeader.block_hash, replyHeader.length, SHA256_HASH_SIZE);
-  replyHeader.this_block = 0; //TODO: verify that this_block should actually be 0.
+  replyHeader.this_block    = htobe32(1);
 
   compsys_helper_writen(connfd, &replyHeader,  sizeof(replyHeader));
   compsys_helper_writen(connfd, reply_payload, payload_length);
@@ -647,12 +753,11 @@ void* server_thread()
     while(1) {
       int connfd = accept(listenfd, NULL, NULL);
 
-      // lock mutex
+      pthread_mutex_lock(&network_mutex);
 
       handle_server_request(connfd);
 
-
-      // unlock mutex
+      pthread_mutex_unlock(&network_mutex);
     }
 }
 

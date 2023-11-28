@@ -46,7 +46,7 @@ void handle_register(int connfd, char* client_ip, int client_port_int);
 
 void handle_inform(char* request, int request_len);
 
-void handle_retrieve(int connfd, char* request);
+void handle_retrieve(int connfd, char* request, int request_len);
 
 void handle_server_request(int connfd);
 
