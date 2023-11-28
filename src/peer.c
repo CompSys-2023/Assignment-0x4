@@ -540,6 +540,8 @@ void handle_register(int connfd, char* client_ip, int client_port_int)
  * never generate a response, even in the case of errors.
  */
 void handle_inform(char* request, int request_len) {
+  // Update network
+  // Do some validation
 
 }
 
@@ -551,6 +553,10 @@ void handle_retrieve(int connfd, char* request)
 {
     // Your code here. This function has been added as a guide, but feel free
     // to add more, or work in other parts of the code
+
+    // Find if we have file on storage
+    // If so, upload it
+    // If not, respond with bad request
 }
 
 /*
@@ -561,6 +567,45 @@ void handle_server_request(int connfd)
 {
     // Your code here. This function has been added as a guide, but feel free
     // to add more, or work in other parts of the code
+
+
+  // Read request from client
+  RequestHeader_t request_header = { 0 };
+  compsys_helper_readn(connfd, &request_header, sizeof(request_header));
+
+  int command = be32toh(request_header.command);
+  int request_length = be32toh(request_header.length);
+  char* request_body = NULL;
+
+  if (request_length > 0) {
+    request_body = malloc(request_length);
+    compsys_helper_readn(connfd, request_body, be32toh(request_header.length));
+  }
+
+  if(request_length <= 0 && (command == COMMAND_RETREIVE || command == COMMAND_INFORM)) {
+    printf("Got invalid request\n");
+    handle_unknown(connfd); //TODO: change to malformed request error
+    return;
+  }
+
+  switch (command) {
+  case COMMAND_REGISTER:
+    printf("Got register request\n");
+    handle_register(connfd, request_header.ip, be32toh(request_header.port));
+    break;
+  case COMMAND_INFORM:
+    printf("Got inform request\n");
+    handle_inform(request_body, request_length);
+    break;
+  case COMMAND_RETREIVE:
+    printf("Got retrieve request\n");
+    handle_retrieve(connfd, request_body);
+    break;
+  default:
+    printf("Got unknown request\n");
+    handle_unknown(connfd);
+    break;
+  }
 }
 
 void handle_unknown(int connfd) {
@@ -587,7 +632,6 @@ void* server_thread()
       return NULL;
     }
 
-
     // Your code here. This function has been added as a guide, but feel free
     // to add more, or work in other parts of the code
     int listenfd = compsys_helper_open_listenfd(my_address->port);
@@ -603,43 +647,12 @@ void* server_thread()
     while(1) {
       int connfd = accept(listenfd, NULL, NULL);
 
-      // Read request from client
-      RequestHeader_t request_header = { 0 };
-      compsys_helper_readn(connfd, &request_header, sizeof(request_header));
+      // lock mutex
 
-      int command = be32toh(request_header.command);
-      int request_length = be32toh(request_header.length);
-      char* request_body = NULL;
+      handle_server_request(connfd);
 
-      if (request_length > 0) {
-        request_body = malloc(request_length);
-        compsys_helper_readn(connfd, request_body, be32toh(request_header.length));
-      }
 
-      if(request_length <= 0 && (command == COMMAND_RETREIVE || command == COMMAND_INFORM)) {
-        printf("Got invalid request\n");
-        handle_unknown(connfd); //TODO: change to malformed request error
-        continue;
-      }
-
-      switch (command) {
-        case COMMAND_REGISTER:
-          printf("Got register request\n");
-          handle_register(connfd, request_header.ip, be32toh(request_header.port));
-          break;
-        case COMMAND_INFORM:
-          printf("Got inform request\n");
-          handle_inform(request_body, request_length);
-          break;
-        case COMMAND_RETREIVE:
-          printf("Got retrieve request\n");
-          handle_retrieve(connfd, request_body);
-          break;
-        default:
-          printf("Got unknown request\n");
-          handle_unknown(connfd);
-          break;
-      }
+      // unlock mutex
     }
 }
 
