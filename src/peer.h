@@ -41,6 +41,7 @@ typedef struct NetworkAddress {
     uint32_t port;
 } NetworkAddress_t;
 
+ReplyHeader_t create_header(int status, int this_block, int block_count, int block_len, char* block_data, hashdata_t total_hash);
 
 void handle_register(int connfd, char* client_ip, int client_port_int);
 
