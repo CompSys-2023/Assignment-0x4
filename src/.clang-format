@@ -22,7 +22,7 @@ BraceWrapping:
 AllowShortFunctionsOnASingleLine: All
 
 # Do not align assignments
-AlignConsecutiveAssignments: false
+AlignConsecutiveAssignments: Consecutive
 
 # Pointers alignment: Align to the left (e.g., int *x;)
 PointerAlignment: Left
