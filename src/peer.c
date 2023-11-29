@@ -16,6 +16,8 @@
 #include "./peer.h"
 #include "./sha256.h"
 
+#define MAX_FILE_PATH_LEN 16
+
 // Global variables to be used by both the server and client side of the peer.
 // Some of these are not currently used but should be considered STRONG hints
 PeerAddress_t* my_address;
@@ -58,7 +60,7 @@ void get_file_sha(const char* sourcefile, hashdata_t hash, int size) {
 
   FILE* fp = fopen(sourcefile, "rb");
   if (fp == 0) {
-    printf("Failed to open source: %s\n", sourcefile);
+    printf("[Error]: Failed to open source: %s\n", sourcefile);
     return;
   }
 
@@ -101,7 +103,7 @@ void get_random_peer(PeerAddress_t* peer_address) {
   }
 
   if (potential_count == 0) {
-    printf("No peers to connect to. You probably have not implemented "
+    printf("[Error]: No peers to connect to. You probably have not implemented "
            "registering with the network yet.\n");
   }
 
@@ -123,7 +125,7 @@ void get_random_peer(PeerAddress_t* peer_address) {
  * specifically an 'inform' message as described in the assignment handout, a
  * reply will always be expected.
  */
-void send_message(PeerAddress_t peer_address, int command, char* request_body) {
+void send_message(PeerAddress_t peer_address, int command, char* request_body, int* status_code) {
   fprintf(stdout, "Connecting to server at %s:%s to run command %d (%s)\n",
           peer_address.ip, peer_address.port, command, request_body);
 
@@ -179,6 +181,10 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body) {
   uint32_t this_block   = ntohl(*(uint32_t*)&reply_header[8]);
   uint32_t block_count  = ntohl(*(uint32_t*)&reply_header[12]);
 
+  if (status_code != NULL) { 
+    *status_code = reply_status;
+  }
+
   hashdata_t block_hash;
   memcpy(block_hash, &reply_header[16], SHA256_HASH_SIZE);
   hashdata_t total_hash;
@@ -210,14 +216,14 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body) {
 
       // Check we're getting consistent results
       if (ref_count != block_count) {
-        fprintf(stdout, "Got inconsistent block counts between blocks\n");
+        fprintf(stdout, "[Error]: Got inconsistent block counts between blocks\n");
         close(peer_socket);
         return;
       }
 
       for (int i = 0; i < SHA256_HASH_SIZE; i++) {
         if (ref_hash[i] != total_hash[i]) {
-          fprintf(stdout, "Got inconsistent total hashes between blocks\n");
+          fprintf(stdout, "[Error]: Got inconsistent total hashes between blocks\n");
           close(peer_socket);
           return;
         }
@@ -227,9 +233,9 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body) {
     // Check response status
     if (reply_status != STATUS_OK) {
       if (command == COMMAND_REGISTER && reply_status == STATUS_PEER_EXISTS) {
-        printf("Peer already exists\n");
+        printf("[Error]: Peer already exists\n");
       } else {
-        printf("Got unexpected status %d\n", reply_status);
+        printf("[Error]: Got unexpected status %d\n", reply_status);
         close(peer_socket);
         return;
       }
@@ -247,18 +253,18 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body) {
 
     for (int i = 0; i < SHA256_HASH_SIZE; i++) {
       if (payload_hash[i] != block_hash[i]) {
-        fprintf(stdout, "Payload hash does not match specified\n");
+        fprintf(stdout, "[Error]: Payload hash does not match specified\n");
         close(peer_socket);
         return;
       }
     }
-
+    
     // If we're trying to get a file, actually write that file
     if (command == COMMAND_RETREIVE) {
       // Check we can access the output file
       fp = fopen(output_file_path, "r+b");
       if (fp == 0) {
-        printf("Failed to open destination: %s\n", output_file_path);
+        printf("[Error]: Failed to open destination: %s\n", output_file_path);
         close(peer_socket);
       }
 
@@ -276,7 +282,7 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body) {
 
   // Confirm that our file is indeed correct
   if (command == COMMAND_RETREIVE) {
-    fprintf(stdout, "Got data and wrote to %s\n", output_file_path);
+    fprintf(stdout, "[Info]: Got data and wrote to %s\n", output_file_path);
 
     // Finally, check that the hash of all the data is as expected
     hashdata_t file_hash;
@@ -284,7 +290,7 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body) {
 
     for (int i = 0; i < SHA256_HASH_SIZE; i++) {
       if (file_hash[i] != total_hash[i]) {
-        fprintf(stdout, "File hash does not match specified for %s\n",
+        fprintf(stdout, "[Error]: File hash does not match specified for %s\n",
                 output_file_path);
         close(peer_socket);
         return;
@@ -306,7 +312,7 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body) {
       int peer_size = IP_LEN + sizeof(int32_t);
       peer_count    = reply_length / peer_size;
 
-      printf("Adding %d peers to network\n", peer_count);
+      printf("[Info]: Adding %d peers to network\n", peer_count);
 
       network = malloc(sizeof(PeerAddress_t*) * peer_count);
 
@@ -330,12 +336,12 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body) {
         memcpy(network[i]->ip, ip, IP_LEN);
         memcpy(network[i]->port, port_str, PORT_LEN);
 
-        printf("Added peer: %s:%s\n", network[i]->ip, network[i]->port);
+        printf("[Info]: Added peer: %s:%s\n", network[i]->ip, network[i]->port);
       }
       return;
     }
   } else {
-    printf("Got response code: %d, %s\n", reply_status, reply_body);
+    printf("[Info]: Got response code: %d, %s\n", reply_status, reply_body);
   }
   free(reply_body);
   close(peer_socket);
@@ -356,21 +362,39 @@ void* client_thread(void* thread_args) {
 
   // Register the given user
   printf("Registering...\n");
-  send_message(*peer_address, COMMAND_REGISTER, "\0");
+  send_message(*peer_address, COMMAND_REGISTER, "\0", NULL);
 
-  return NULL;
-  // Update peer_address with random peer from network
-  get_random_peer(peer_address);
+  while (1) {
+    printf("What file do you want to get?\n");
+    char buf[MAX_FILE_PATH_LEN];
 
-  // Retrieve the smaller file, that doesn't not require support for blocks
-  send_message(*peer_address, COMMAND_RETREIVE, "tiny.txt");
+    if (scanf("%15s", buf) < 0) {
+      printf("[Error]: Unable to read user input.");
+      continue;
+    }
 
-  // Update peer_address with random peer from network
-  get_random_peer(peer_address);
+    if (strcmp(buf, "quit") == 0) {
+      printf("[Info]: Quitting client..\n");
+      return;
+    }
 
-  // Retrieve the larger file, that requires support for blocked messages
-  send_message(*peer_address, COMMAND_RETREIVE, "hamlet.txt");
-
+    int file_found = 0; 
+    for (int i = 0; i < peer_count; i++){
+      int status_code;
+      send_message(*peer_address, COMMAND_RETREIVE, buf, &status_code);
+      if (status_code == STATUS_OK){
+        printf("[Info]: File found in peer %s:%s\n", peer_address->ip, peer_address->port);
+        file_found = 1;
+        break;
+      }else{
+        continue;
+      }
+    }
+    
+    if (file_found == 0){
+      printf("[Error]: File was not found in the network.\n");
+    }
+  }
   return NULL;
 }
 
@@ -403,7 +427,7 @@ void handle_register(int connfd, char* client_ip, int client_port_int) {
   // Reply to client of failure
   ReplyHeader_t replyHeader = {0};
   if (already_exists == 1) {
-    char reply_payload[] = "Peer is already registered!";
+    char reply_payload[] = "[Error]: Peer is already registered!";
     int  payload_length  = strlen(reply_payload);
 
     replyHeader.status      = htobe32(2); // 2 - Peer already exists!
@@ -498,7 +522,7 @@ void handle_register(int connfd, char* client_ip, int client_port_int) {
 
     memcpy(payload, register_peer.ip, IP_LEN);
     memcpy(payload + IP_LEN, &client_port_net, sizeof(int32_t));
-    send_message(*peer, COMMAND_INFORM, payload);
+    send_message(*peer, COMMAND_INFORM, payload, NULL);
   }
 }
 
@@ -580,10 +604,9 @@ must be the filename/filepath of the requested file
 
   fopen(file_name, "r");
   if (errno == ENOENT) {
-    // File does not exist
-    printf("File does not exist\n");
-    // TODO: perhaps make this into a handle_error, where we can pass in an
-    // error code handle_unknown(connfd);
+    char* msg = "[Error]: File does not exist";
+    printf("%s\n", msg);
+    send_error(connfd, STATUS_BAD_REQUEST, msg, strlen(msg));
     return;
   }
 
@@ -621,16 +644,26 @@ must be the filename/filepath of the requested file
            block_size);
 
     // Send block
-    ReplyHeader_t header =
-        create_header(STATUS_OK, i, blocks_count, block_size, block, total_hash);
-
-    // Attach payload to header
-    char* reply = malloc(sizeof(ReplyHeader_t) + block_size);
-    memcpy(reply, &header, sizeof(ReplyHeader_t));
-    memcpy(reply + sizeof(ReplyHeader_t), block, block_size);
-
-    compsys_helper_writen(connfd, reply, sizeof(ReplyHeader_t) + block_size);
+    ReplyHeader_t header = create_header(STATUS_OK, i, blocks_count, block_size, block, total_hash);
+    send_reply(connfd, header, block, block_size);
   }
+}
+
+void send_error(int connfd, int status, char* errmsg, size_t msg_size) {
+  hashdata_t total_hash;
+  get_data_sha(errmsg, total_hash, msg_size, SHA256_HASH_SIZE);
+  ReplyHeader_t header = create_header(STATUS_OK, 0, 1, msg_size, errmsg, 0);
+  send_reply(connfd, header, errmsg, msg_size);
+}
+
+void send_reply(int connfd, ReplyHeader_t header, void* data, size_t data_size) {
+  // Attach payload to header
+  size_t reply_size = sizeof(ReplyHeader_t) + data_size;
+
+  char* reply = malloc(reply_size);
+  memcpy(reply, &header, sizeof(ReplyHeader_t));
+  memcpy(reply + sizeof(ReplyHeader_t), data, data_size);
+  compsys_helper_writen(connfd, reply, reply_size);
 }
 
 /*
@@ -655,9 +688,10 @@ void handle_server_request(int connfd) {
 
   if (request_length <= 0 &&
       (command == COMMAND_RETREIVE || command == COMMAND_INFORM)) {
-    printf("Got invalid request\n");
-    handle_unknown(connfd); // TODO: change to malformed request error
-    return;
+        char* msg = "Got invalid request";
+        printf("%s\n", msg);
+        send_error(connfd, STATUS_MALFORMED, msg, strlen(msg));
+        return;
   }
 
   switch (command) {
@@ -674,27 +708,13 @@ void handle_server_request(int connfd) {
       handle_retrieve(connfd, request_body, request_length);
       break;
     default:
-      printf("Got unknown request\n");
-      handle_unknown(connfd);
+      char* msg = "Got unknown request\n";
+      printf("%s\n", msg);
+      send_error(connfd, STATUS_OTHER, msg, strlen(msg));
       break;
   }
 }
 
-void handle_unknown(int connfd) {
-  ReplyHeader_t replyHeader    = {0};
-  char*         reply_payload  = strdup("Unknown command!");
-  int           payload_length = strlen(reply_payload);
-
-  replyHeader.status      = htobe32(4); // 4 - other error
-  replyHeader.block_count = htobe32(1);
-  replyHeader.length      = htobe32(payload_length);
-  get_data_sha(reply_payload, replyHeader.block_hash, replyHeader.length,
-               SHA256_HASH_SIZE);
-  replyHeader.this_block = htobe32(1);
-
-  compsys_helper_writen(connfd, &replyHeader, sizeof(replyHeader));
-  compsys_helper_writen(connfd, reply_payload, payload_length);
-}
 /*
  * Function to act as basis for running the server thread. This thread will be
  * run concurrently with the client thread, but is infinite in nature.
@@ -739,6 +759,8 @@ ReplyHeader_t create_header(int status, int this_block, int block_count, int blo
   memcpy(header.total_hash, total_hash, SHA256_HASH_SIZE);
   return header;
 }
+
+
 
 int main(int argc, char** argv) {
   // Initialise with known junk values, so we can test if these were actually
