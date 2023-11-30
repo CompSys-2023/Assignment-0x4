@@ -65,7 +65,11 @@ void log_error(char* msg, ...) {
   va_end(args);
 }
 
-
+// Compares two peers to see if they are equal. Assumes that all fields are
+// null terminated. Returns 1 if they are equal, 0 otherwise.
+int peer_equals(PeerAddress_t peer1, PeerAddress_t peer2) {
+  return strcmp(peer1.ip, peer2.ip) == 0 && strcmp(peer1.port, peer2.port) == 0;
+}
 
 
 /*
@@ -376,18 +380,26 @@ void* client_thread(void* thread_args) {
     int file_found = 0; 
     for (size_t i = 0; i < peer_count; i++){
       int status_code;
-      send_message(*peer_address, COMMAND_RETREIVE, buf, &status_code);
+
+      PeerAddress_t* peer = network[i];
+
+      // We do not want to send a request to ourselves
+      if(peer_equals(*peer, *my_address)) {
+        continue;
+      }
+
+      send_message(*peer, COMMAND_RETREIVE, buf, &status_code);
       if (status_code == STATUS_OK){
-        log_info("File found in peer %s:%s\n", peer_address->ip, peer_address->port);
+        log_info("File %s found in peer %s:%s\n", buf, peer->ip, peer->port);
         file_found = 1;
         break;
-      }else{
+      } else {
         continue;
       }
     }
     
     if (file_found == 0){
-      log_error("File was not found in the network.\n");
+      log_info("File was not found in the network.\n");
     }
   }
   return NULL;
@@ -546,23 +558,32 @@ void handle_inform(char* request) {
  * always generate a response
  */
 void handle_retrieve(int connfd, char* request, int request_len) {
-
-  //
+  // Make sure the file name is null terminated.
   char* file_name = calloc(request_len + 1, sizeof(char));
   memcpy(file_name, request, request_len);
 
-  printf("Got retrieve request for %s\n", file_name);
+  log_info("Got retrieve request for %s\n", file_name);
 
-  fopen(file_name, "r");
-  if (errno == ENOENT) {
-    char* msg = "[Error]: File does not exist";
-    printf("%s\n", msg);
+  if (!access(file_name, F_OK) == 0) {
+    char* msg = "File does not exist";
+    log_error("%s: %s\n", msg, file_name);
     send_error(connfd, STATUS_BAD_REQUEST, msg, strlen(msg));
+
+    free(file_name);
+    return;
+  }
+
+  FILE* fp = fopen(file_name, "rb");
+  if (fp == NULL) {
+    char* msg = "Failed to open file";
+    log_error("%s: %s\n", msg, file_name);
+    send_error(connfd, STATUS_BAD_REQUEST, msg, strlen(msg));
+
+    free(file_name);
     return;
   }
 
   // Get file size
-  FILE* fp = fopen(file_name, "rb");
   fseek(fp, 0L, SEEK_END);
   int file_size = ftell(fp);
   fseek(fp, 0L, SEEK_SET);
@@ -571,33 +592,32 @@ void handle_retrieve(int connfd, char* request, int request_len) {
   int blocks_count =
       ceilf((float)file_size / (float)(MAX_MSG_LEN - REPLY_HEADER_LEN));
 
-  // Get file hash
+  // Compute file hash
   hashdata_t total_hash;
   get_file_sha(file_name, total_hash, SHA256_HASH_SIZE);
 
-  // Get file contents
-  char* file_contents =
-      malloc(file_size); // maybe bad in case of the big file? Allocating the
-                         // whole thing on the heap?... idk
+  // Write file to memory. This can be problematic for large files.
+  char* file_contents = malloc(file_size);
   fread(file_contents, file_size, 1, fp);
   fclose(fp);
 
   for (int i = 0; i < blocks_count; i++) {
-    printf("Sending block %d/%d\n", i, blocks_count);
+    log_info("Sending block %d/%d\n", i, blocks_count - 1);
 
     // Get block size
     int block_size = min(MAX_MSG_LEN - REPLY_HEADER_LEN,
                          file_size - (i * (MAX_MSG_LEN - REPLY_HEADER_LEN)));
 
-    // Get block
-    char* block = malloc(block_size);
-    memcpy(block, file_contents + (i * (MAX_MSG_LEN - REPLY_HEADER_LEN)),
-           block_size);
+    // Get block by offsetting the file contents
+    char* block = file_contents + (i * (MAX_MSG_LEN - REPLY_HEADER_LEN));
 
     // Send block
     ReplyHeader_t header = create_header(STATUS_OK, i, blocks_count, block_size, block, total_hash);
     send_reply(connfd, header, block, block_size);
   }
+
+  free(file_contents);
+  free(file_name);
 }
 
 void send_error(int connfd, int status, char* errmsg, size_t msg_size) {
@@ -644,15 +664,12 @@ void handle_server_request(int connfd) {
 
   switch (command) {
     case COMMAND_REGISTER:
-      printf("Got register request\n");
       handle_register(connfd, request_header.ip, be32toh(request_header.port));
       break;
     case COMMAND_INFORM:
-      printf("Got inform request\n");
       handle_inform(request_body);
       break;
     case COMMAND_RETREIVE:
-      printf("Got retrieve request\n");
       handle_retrieve(connfd, request_body, request_length);
       break;
     default:
