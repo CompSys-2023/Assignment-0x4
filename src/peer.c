@@ -121,7 +121,7 @@ void get_file_sha(const char* sourcefile, hashdata_t hash, int size) {
  * Send a request message to another peer on the network. Unless this is
  * specifically an 'inform' message, a reply will always be expected.
  */
-void send_message(PeerAddress_t peer_address, int command, char* request_body, int* status_code) {
+void send_message(PeerAddress_t peer_address, int command, char* request_body, size_t request_size, int* status_code) {
 
   log_info("Connecting to server at %s:%s to run command %d (%s)\n",
           peer_address.ip, peer_address.port, command, request_body);
@@ -133,7 +133,7 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body, i
   // Setup the eventual output file path. This is being done early so if
   // something does go wrong at this stage we can avoid all that pesky
   // networking
-  char output_file_path[strlen(request_body) + 1];
+  char output_file_path[request_size + 1];
   if (command == COMMAND_RETREIVE) {
     strcpy(output_file_path, request_body);
 
@@ -153,13 +153,13 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body, i
   strncpy(request_header.ip, my_address->ip, IP_LEN);
   request_header.port    = htonl(atoi(my_address->port));
   request_header.command = htonl(command);
-  request_header.length  = htonl(strlen(request_body));
+  request_header.length  = htonl(request_size);
 
   memcpy(msg_buf, &request_header, REQUEST_HEADER_LEN);
-  memcpy(msg_buf + REQUEST_HEADER_LEN, request_body, strlen(request_body));
+  memcpy(msg_buf + REQUEST_HEADER_LEN, request_body, request_size);
 
   compsys_helper_writen(peer_socket, msg_buf,
-                        REQUEST_HEADER_LEN + strlen(request_body));
+                        REQUEST_HEADER_LEN + request_size);
 
   // We don't expect replies to inform messages so we're done here
   if (command == COMMAND_INFORM) {
@@ -347,16 +347,20 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body, i
  * will be run concurrently with the server_thread but is finite in nature.
  */
 void* client_thread(void* thread_args) {
+  log_info("Starting server thread...\n");
+
   struct PeerAddress* peer_address = thread_args;
 
   // Register the given user
   int status_code = -1;
-  send_message(*peer_address, COMMAND_REGISTER, "\0", &status_code);
+  send_message(*peer_address, COMMAND_REGISTER, "\0", 0, &status_code);
 
   if(status_code != STATUS_OK){
     log_error("Unable to register with peer %s:%s\n", peer_address->ip, peer_address->port);
     return NULL;
   }
+
+  log_info("Client thread started!\n");
 
   while (1) {
     pthread_mutex_lock(&stdout_mutex);
@@ -388,7 +392,7 @@ void* client_thread(void* thread_args) {
         continue;
       }
 
-      send_message(*peer, COMMAND_RETREIVE, buf, &status_code);
+      send_message(*peer, COMMAND_RETREIVE, buf, strlen(buf), &status_code);
       if (status_code == STATUS_OK){
         log_info("File %s found in peer %s:%s\n", buf, peer->ip, peer->port);
         file_found = 1;
@@ -494,21 +498,23 @@ void handle_register(int connfd, char* client_ip, int client_port_int) {
     PeerAddress_t* peer = network[i];
 
     // If the peer is the one that just registered or us, skip it
-    if ((strcmp(peer->ip, my_address->ip) == 0 &&
-            strcmp(peer->port, my_address->port) == 0) ||
-        (strcmp(peer->ip, register_peer.ip) == 0 &&
-            strcmp(peer->port, register_peer.port) == 0)) {
+    if (peer_equals(*peer, register_peer) || peer_equals(*peer, *my_address))
+    {
       continue;
     }
 
     // Create payload and convert the registering peer's port to network byte
-    char* payload           = malloc(20);
-    int   register_port_net = htobe32(client_port_int);
+    char  payload[IP_LEN + sizeof(int32_t)] = { 0 };
+    int   register_port_net                 = htonl(client_port_int);
+
+    log_info("Informing peer %s:%s of new peer %s:%d\n", peer->ip, peer->port,
+             register_peer.ip, client_port_int);
 
     // Assemble payload and send it
     memcpy(payload, register_peer.ip, IP_LEN);
     memcpy(payload + IP_LEN, &register_port_net, sizeof(int32_t));
-    send_message(*peer, COMMAND_INFORM, payload, NULL);
+
+    send_message(*peer, COMMAND_INFORM, payload, IP_LEN + sizeof(int32_t), NULL);
   }
 }
 
@@ -525,14 +531,16 @@ void handle_inform(char* request) {
 
   port = ntohl(port);
 
+  //TODO; fix, this currently logs the wrong ip and port. It should be logging
+  // the ip and port of the peer that sent the inform message.
   log_info("Got inform message from %s:%d\n", ip, port);
 
-  PeerAddress_t* new_peer = malloc(sizeof(PeerAddress_t));
+  PeerAddress_t* new_peer = calloc(1, sizeof(PeerAddress_t));
   memcpy(new_peer->ip, ip, IP_LEN);
   sprintf(new_peer->port, "%d", port);
 
   if (!is_valid_ip(new_peer->ip) || !is_valid_port(new_peer->port)) {
-    log_info("Received peer %s:%d has invalid formatting.", new_peer->ip, port);
+    log_info("Received peer %s:%d has invalid formatting.\n", new_peer->ip, port);
     free(new_peer);
     return;
   }
@@ -540,13 +548,14 @@ void handle_inform(char* request) {
   for (size_t i = 0; i < peer_count; i++) {
     PeerAddress_t* peer = network[i];
 
-    if (strcmp(peer->ip, my_address->ip) == 0 &&
-        strcmp(peer->port, my_address->port) == 0) {
-      log_info("Received peer %s:%d is already registered.", new_peer->ip, port);
+    if (peer_equals(*peer, *new_peer)) {
+      log_info("Received peer %s:%d is already registered.\n", new_peer->ip, port);
       free(new_peer);
       return;
     }
   }
+
+  log_info("Adding peer %s:%d to network\n", new_peer->ip, port);
 
   peer_count++;
   network = realloc(network, sizeof(PeerAddress_t*) * peer_count);
@@ -562,11 +571,11 @@ void handle_retrieve(int connfd, char* request, int request_len) {
   char* file_name = calloc(request_len + 1, sizeof(char));
   memcpy(file_name, request, request_len);
 
-  log_info("Got retrieve request for %s\n", file_name);
+  log_info("Got retrieve request for \"%s\"\n", file_name);
 
-  if (!access(file_name, F_OK) == 0) {
+  if (access(file_name, F_OK) == -1) {
     char* msg = "File does not exist";
-    log_error("%s: %s\n", msg, file_name);
+    log_error("%s: \"%s\", reason: %s\n", msg, file_name, strerror(errno));
     send_error(connfd, STATUS_BAD_REQUEST, msg, strlen(msg));
 
     free(file_name);
@@ -576,7 +585,7 @@ void handle_retrieve(int connfd, char* request, int request_len) {
   FILE* fp = fopen(file_name, "rb");
   if (fp == NULL) {
     char* msg = "Failed to open file";
-    log_error("%s: %s\n", msg, file_name);
+    log_error("%s: \"%s\"\n", msg, file_name);
     send_error(connfd, STATUS_BAD_REQUEST, msg, strlen(msg));
 
     free(file_name);
@@ -656,8 +665,8 @@ void handle_server_request(int connfd) {
 
   if (request_length <= 0 &&
       (command == COMMAND_RETREIVE || command == COMMAND_INFORM)) {
-        char* msg = "Got invalid request";
-        printf("%s\n", msg);
+        char* msg = "Received invalid request";
+        log_error("%s\n", msg);
         send_error(connfd, STATUS_MALFORMED, msg, strlen(msg));
         return;
   }
@@ -686,10 +695,7 @@ void handle_server_request(int connfd) {
  * run concurrently with the client thread, but is infinite in nature.
  */
 void* server_thread() {
-  if (strcmp(my_address->port, "23457") == 0) {
-    return NULL;
-  }
-
+  log_info("Starting server thread...\n");
   // Your code here. This function has been added as a guide, but feel free
   // to add more, or work in other parts of the code
   int listenfd = compsys_helper_open_listenfd(my_address->port);
@@ -701,6 +707,8 @@ void* server_thread() {
   }
 
   listen(listenfd, 10);
+
+  log_info("Server thread started!\n");
 
   while (1) {
     int connfd = accept(listenfd, NULL, NULL);
