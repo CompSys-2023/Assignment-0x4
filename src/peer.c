@@ -33,6 +33,29 @@ size_t          file_count       = 0;
 
 pthread_mutex_t stdout_mutex     = PTHREAD_MUTEX_INITIALIZER;
 
+int listenfd                     = -1;
+
+int shutdown_flag = 0;
+
+// Not thread-safe, make sure that network_mutex is locked before calling!
+int resize_network(size_t new_size) {
+  PeerAddress_t** new_network = realloc(network, sizeof(PeerAddress_t*) * new_size);
+  if (new_network == NULL) {
+    return -1;
+  }
+
+  network = new_network;
+  return 0;
+}
+
+// Not thread-safe, make sure that network_mutex is locked before calling!
+void free_network(void) {
+  for (size_t i = 0; i < peer_count; ++i) {
+    free(network[i]);
+  }
+  free(network);
+}
+
 void log_info(char* msg, ...) {
   static const char log_level[5] = "INFO";
 
@@ -303,6 +326,10 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body, s
 
   if (reply_status == STATUS_OK) {
     if (command == COMMAND_REGISTER) {
+      // When we register, we get a list of all peers in the network including
+      // Ourselves. This means, we should reset the network and add all peers.
+      free_network();
+
       // Get how many peers we got from the payload
       int peer_size = IP_LEN + sizeof(int32_t);
       peer_count    = reply_length / peer_size;
@@ -333,7 +360,6 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body, s
 
         log_info("Added peer: %s:%s\n", network[i]->ip, network[i]->port);
       }
-      return;
     }
   } else {
     log_info("Got response code: %d, %s\n", reply_status, reply_body);
@@ -362,7 +388,7 @@ void* client_thread(void* thread_args) {
 
   log_info("Client thread started!\n");
 
-  while (1) {
+  while (shutdown_flag == 0) {
     pthread_mutex_lock(&stdout_mutex);
     printf("What file do you want to get?\n");
     pthread_mutex_unlock(&stdout_mutex);
@@ -378,6 +404,9 @@ void* client_thread(void* thread_args) {
 
     if (strcmp(buf, "quit") == 0) {
       log_info("Quitting client...\n");
+      shutdown_flag = 1;
+      // Shutdown the server thread
+      shutdown(listenfd, SHUT_RD);
       break;
     }
 
@@ -419,31 +448,31 @@ void handle_register(int connfd, char* client_ip, int client_port_int) {
   sprintf(register_peer.port, "%d", client_port_int);
 
   //  Check if peer exists already
-  int already_exists = 0;
-
   for (size_t i = 0; i < peer_count; ++i) {
-    if (strcmp(register_peer.ip, network[i]->ip) == 0 &&
-        strcmp(register_peer.port, network[i]->port) == 0) {
-      // Peer is already on the network!
-      already_exists = 1;
+    PeerAddress_t* peer = network[i];
+    // If the peer already exists, we will log and respond with an error.
+    if(peer_equals(register_peer, *peer)){
+      // Make sure the ip string is null terminated, so we can use it for formatting.
+      char ip_string[IP_LEN + 1] = { 0 };
+      memcpy(ip_string, register_peer.ip, IP_LEN);
+
+      log_info("Cannot register peer %s:%s, peer already exists.\n", ip_string,
+               register_peer.port);
+      send_error(connfd, STATUS_PEER_EXISTS, ip_string, IP_LEN);
+      return;
     }
   }
 
-  // If we failed, reply to client of failure
-  if (already_exists == 1) {
-    // Make sure the ip string is null terminated, so we can use it for formatting.
-    char ip_string[IP_LEN + 1] = { 0 };
-    memcpy(ip_string, register_peer.ip, IP_LEN);
-
-    log_info("Cannot register peer %s:%s, peer already exists.\n", ip_string,
-             register_peer.port);
-    send_error(connfd, STATUS_PEER_EXISTS, ip_string, IP_LEN);
+  // Resize the network to fit the new peer. If it fails, we will log and respond with an error.
+  size_t new_size = peer_count + 1;
+  if (resize_network(new_size) == -1) {
+    char error_msg[] = "Failed to resize network";
+    log_error("%s\n", error_msg);
+    send_error(connfd, STATUS_OTHER, error_msg, sizeof(error_msg));
     return;
   }
-
-  // Add peer to the network
-  peer_count++;
-  network = realloc(network, sizeof(PeerAddress_t*) * peer_count);
+  // Update the network with the new peer.
+  peer_count = new_size;
   network[peer_count - 1] = malloc(sizeof(PeerAddress_t));
 
   char port_char[PORT_LEN];
@@ -535,31 +564,36 @@ void handle_inform(char* request) {
   // the ip and port of the peer that sent the inform message.
   log_info("Got inform message from %s:%d\n", ip, port);
 
-  PeerAddress_t* new_peer = calloc(1, sizeof(PeerAddress_t));
-  memcpy(new_peer->ip, ip, IP_LEN);
-  sprintf(new_peer->port, "%d", port);
+  PeerAddress_t new_peer = { 0 };
+  memcpy(new_peer.ip, ip, IP_LEN);
+  sprintf(new_peer.port, "%d", port);
 
-  if (!is_valid_ip(new_peer->ip) || !is_valid_port(new_peer->port)) {
-    log_info("Received peer %s:%d has invalid formatting.\n", new_peer->ip, port);
-    free(new_peer);
+  if (!is_valid_ip(new_peer.ip) || !is_valid_port(new_peer.port)) {
+    log_info("Received peer %s:%d has invalid formatting.\n", new_peer.ip, port);
     return;
   }
 
   for (size_t i = 0; i < peer_count; i++) {
     PeerAddress_t* peer = network[i];
 
-    if (peer_equals(*peer, *new_peer)) {
-      log_info("Received peer %s:%d is already registered.\n", new_peer->ip, port);
-      free(new_peer);
+    if (peer_equals(*peer, new_peer)) {
+      log_info("Received peer %s:%d is already registered.\n", new_peer.ip, port);
       return;
     }
   }
 
-  log_info("Adding peer %s:%d to network\n", new_peer->ip, port);
-
-  peer_count++;
-  network = realloc(network, sizeof(PeerAddress_t*) * peer_count);
-  network[peer_count - 1] = new_peer;
+  //Resize the network to fit the new peer. If it fails, we will log and respond with an error.
+  log_info("Adding peer %s:%d to network\n", new_peer.ip, port);
+  size_t new_size = peer_count + 1;
+  if (resize_network(new_size) == -1) {
+    char error_msg[] = "Failed to resize network";
+    log_error("%s\n", error_msg);
+    return;
+  }
+  // Update the network with the new peer.
+  peer_count = new_size;
+  network[peer_count - 1] = malloc(sizeof(PeerAddress_t));
+  memcpy(network[peer_count - 1], &new_peer, sizeof(PeerAddress_t));
 }
 
 /*
@@ -698,7 +732,7 @@ void* server_thread() {
   log_info("Starting server thread...\n");
   // Your code here. This function has been added as a guide, but feel free
   // to add more, or work in other parts of the code
-  int listenfd = compsys_helper_open_listenfd(my_address->port);
+  listenfd = compsys_helper_open_listenfd(my_address->port);
 
   if (listenfd < 0) {
     printf("Could not open listening socket.\n");
@@ -710,8 +744,19 @@ void* server_thread() {
 
   log_info("Server thread started!\n");
 
-  while (1) {
+  while (shutdown_flag == 0) {
     int connfd = accept(listenfd, NULL, NULL);
+
+    if (connfd == -1) {
+      // We do not want to log an error if the server is shutting down.
+      if (shutdown_flag == 1) {
+        log_info("Server shutting down...\n");
+        break;
+      }
+
+      log_error("Failed to accept connection: %s\n", strerror(errno));
+      continue;
+    }
 
     pthread_mutex_lock(&network_mutex);
 
@@ -720,6 +765,8 @@ void* server_thread() {
 
     pthread_mutex_unlock(&network_mutex);
   }
+
+  return NULL;
 }
 
 ReplyHeader_t create_header(int status, int this_block, int block_count, int block_len, char* block_data, hashdata_t total_hash) {
@@ -808,8 +855,13 @@ int main(int argc, char** argv) {
 
   retrieving_files = malloc(file_count * sizeof(FilePath_t*));
 
-  network    = malloc(sizeof(PeerAddress_t*));
-  network[0] = my_address;
+  network    = (PeerAddress_t**)malloc(sizeof(PeerAddress_t*));
+
+  // Copy over our own address to the network, so we do not free my_address
+  // When we free the network.
+  network[0] = (PeerAddress_t*)malloc(sizeof(PeerAddress_t));
+  memcpy(network[0], my_address, sizeof(PeerAddress_t));
+
   peer_count = 1;
 
   // Setup the client and server threads
@@ -828,6 +880,20 @@ int main(int argc, char** argv) {
   }
 
   pthread_join(server_thread_id, NULL);
+
+  log_info("Shutting down...\n");
+
+  // Free network
+  free_network();
+  free(retrieving_files);
+  free(my_address);
+
+  // Free mutexes
+  pthread_mutex_destroy(&network_mutex);
+  pthread_mutex_destroy(&retrieving_mutex);
+  pthread_mutex_destroy(&stdout_mutex);
+
+  log_info("Shutdown complete\n");
 
   exit(EXIT_SUCCESS);
 }
