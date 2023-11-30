@@ -49,3 +49,14 @@ int starts_with(const char *a, const char *b)
   if(strncmp(a, b, strlen(b)) == 0) return 1;
   return 0;
 }
+
+/*
+ * A simple min function, which apparently C doesn't have as standard
+ */
+int min(int a, int b)
+{
+  if (a < b) {
+    return a;
+  }
+  return b;
+}

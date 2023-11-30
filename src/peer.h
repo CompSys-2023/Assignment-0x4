@@ -48,7 +48,7 @@ ReplyHeader_t create_header(int status, int this_block, int block_count, int blo
 
 void handle_register(int connfd, char* client_ip, int client_port_int);
 
-void handle_inform(char* request, int request_len);
+void handle_inform(char* request);
 
 void handle_retrieve(int connfd, char* request, int request_len);
 

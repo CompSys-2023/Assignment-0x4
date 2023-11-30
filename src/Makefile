@@ -1,3 +1,5 @@
+.PHONY: tests
+
 #GCC=gcc -g -Wall -Wextra -pedantic -std=gnu11
 GCC=gcc -g -Wall -Wextra -pedantic -std=gnu11
 LD_FLAGS= -lpthread -lm
@@ -5,6 +7,13 @@ LD_FLAGS= -lpthread -lm
 all: peer
 
 rebuild: clean all
+
+
+tests: $(addprefix ../tests/Peer, 1 2 3 4)
+
+../tests/Peer%: peer
+	@mkdir -p $@
+	@cp $< $@
 
 compsys_helpers.o: compsys_helpers.c compsys_helpers.h
 	$(GCC) -c $< -o $@

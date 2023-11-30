@@ -1,5 +1,5 @@
 my_ip: 127.0.0.1
-my_port: 34567
+my_port: 34566
 
 peer_ip: 127.0.0.1
 peer_port: 34568

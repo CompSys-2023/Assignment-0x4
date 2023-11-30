@@ -48,3 +48,4 @@
 int is_valid_ip(char *ip_string);
 int is_valid_port(char *port_string);
 int starts_with(const char *a, const char *b);
+int min(int a, int b);
