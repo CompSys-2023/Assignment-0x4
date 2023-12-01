@@ -53,7 +53,7 @@ int starts_with(const char *a, const char *b)
 /*
  * A simple min function, which apparently C doesn't have as standard
  */
-int min(int a, int b)
+size_t min(size_t a, size_t b)
 {
   if (a < b) {
     return a;

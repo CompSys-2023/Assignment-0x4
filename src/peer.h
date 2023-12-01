@@ -44,14 +44,13 @@ typedef struct NetworkAddress {
 void send_reply(int connfd, ReplyHeader_t header, void* data, size_t data_size);
 void send_error(int connfd, int status, char* errmsg, size_t msg_size);
 
-ReplyHeader_t create_header(int status, int this_block, int block_count, int block_len, char* block_data, hashdata_t total_hash);
+ReplyHeader_t create_header(uint32_t status, uint32_t this_block, uint32_t block_count, uint32_t block_len, char* block_data, hashdata_t total_hash);
 
-void handle_register(int connfd, char* client_ip, int client_port_int);
+void handle_register(int connfd, PeerAddress_t peer);
 
-void handle_inform(char* request);
+void handle_inform(PeerAddress_t* sender, char* request_body);
 
-void handle_retrieve(int connfd, char* request, int request_len);
+void handle_retrieve(int connfd, PeerAddress_t* sender, char* file_name);
 
 void handle_server_request(int connfd);
 
-void* server_thread();
