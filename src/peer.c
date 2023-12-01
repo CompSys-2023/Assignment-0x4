@@ -39,6 +39,12 @@ int shutdown_flag = 0;
 int network_resize(size_t new_size) {
   pthread_mutex_lock(&network_mutex);
 
+  // If the new size is the same as the old size, we can just return early
+  if (new_size == peer_count) {
+    pthread_mutex_unlock(&network_mutex);
+    return 0;
+  }
+
   PeerAddress_t** new_network =
       realloc(network, sizeof(PeerAddress_t*) * new_size);
   if (new_network == NULL) {
@@ -92,14 +98,13 @@ int network_append(PeerAddress_t* peer) {
     return 0;
   }
 
-  pthread_mutex_lock(&network_mutex);
-
   // Resize the network to fit the new peer.
   size_t new_size = peer_count + 1;
   if (network_resize(new_size) == -1) {
-    pthread_mutex_unlock(&network_mutex);
     return -1;
   }
+
+  pthread_mutex_lock(&network_mutex);
 
   // Update the network with the new peer.
   network[peer_count - 1] = peer;
@@ -124,6 +129,19 @@ void free_network(void) {
 // Remarks: Is thread-safe.
 int retrieving_files_resize(size_t new_size) {
   pthread_mutex_lock(&retrieving_mutex);
+
+  if (new_size == 0) {
+    free(retrieving_files);
+    file_count = 0;
+    pthread_mutex_unlock(&retrieving_mutex);
+    return 0;
+  }
+
+  // If the new size is the same as the old size, we can just return early
+  if (new_size == file_count) {
+    pthread_mutex_unlock(&retrieving_mutex);
+    return 0;
+  }
 
   FilePath_t** new_retrieving_files =
       realloc(retrieving_files, sizeof(FilePath_t*) * new_size);
@@ -166,18 +184,28 @@ int retrieving_files_exists(FilePath_t* file_path) {
 //          -1 if an error occurred
 // Remarks: Is thread-safe. Automatically resizes the array.
 int retrieving_files_append(FilePath_t* file_path) {
+  pthread_mutex_lock(&retrieving_mutex);
+
+  // If the array is empty, we have to allocate memory for it
+  if(file_count == 0) {
+    retrieving_files = malloc(sizeof(FilePath_t*));
+  }
+
+  pthread_mutex_unlock(&retrieving_mutex);
+
   // Check if the file is already being retrieved
-  if (retrieving_files_exists(file_path)) {
+  if (file_count > 0 && retrieving_files_exists(file_path)) {
     return 0;
   }
 
-  pthread_mutex_lock(&retrieving_mutex);
-
+  // Resie the array to fit the new file
   size_t new_size = file_count + 1;
   if (retrieving_files_resize(new_size) == -1) {
-    pthread_mutex_unlock(&retrieving_mutex);
     return -1;
   }
+
+  // Update the array with the new file
+  pthread_mutex_lock(&retrieving_mutex);
 
   retrieving_files[file_count - 1] = file_path;
 
@@ -196,14 +224,16 @@ int retrieving_files_remove(FilePath_t* file_path) {
 
   int    found       = 0;
   size_t found_index = 0;
-  for (size_t i = 0; i < file_count; ++i) {
-    FilePath_t* path = retrieving_files[i];
 
-    if (strcmp(path->path, file_path->path) == 0) {
+  for (size_t i = 0; i < file_count; ++i) {
+    printf("Comparing %s to %s\n", retrieving_files[i]->path, file_path->path);
+    FilePath_t* fp = retrieving_files[i];
+
+    if (strcmp(fp->path, file_path->path) == 0) {
       // Found the file, remove it
       found       = 1;
       found_index = i;
-      free(path);
+      free(fp);
       retrieving_files[i] = NULL;
       break;
     }
@@ -221,23 +251,26 @@ int retrieving_files_remove(FilePath_t* file_path) {
     retrieving_files[i - 1] = retrieving_files[i];
   }
 
+  pthread_mutex_unlock(&retrieving_mutex);
+
   // We can now resize the array
   size_t new_size = file_count - 1;
   if (retrieving_files_resize(new_size) == -1) {
-    pthread_mutex_unlock(&retrieving_mutex);
     return -1;
   }
-
-  pthread_mutex_unlock(&retrieving_mutex);
   return 1;
 }
 
 // No threads should be running when this is called.
 void free_retrieving_files(void) {
   for (size_t i = 0; i < file_count; ++i) {
-    free(retrieving_files[i]);
+    if (retrieving_files[i] != NULL) {
+      free(retrieving_files[i]);
+    }
   }
-  free(retrieving_files);
+  if (file_count > 0) {
+    free(retrieving_files);
+  }
 }
 
 void log_info(char* msg, ...) {
@@ -328,7 +361,7 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
            peer_address.ip, peer_address.port, command, request_body);
 
   compsys_helper_state_t state;
-  char                   msg_buf[PATH_LEN];
+  char                   msg_buf[MAX_MSG_LEN];
   FILE*                  fp;
 
   // Setup the eventual output file path. This is being done early so if
@@ -416,6 +449,7 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
       if (ref_count != block_count) {
         log_error("Got inconsistent block counts between blocks\n");
         close(peer_socket);
+
         return;
       }
 
@@ -423,6 +457,7 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
         if (ref_hash[i] != total_hash[i]) {
           log_error("Got inconsistent total hashes between blocks\n");
           close(peer_socket);
+
           return;
         }
       }
@@ -440,6 +475,11 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
     }
 
     // Read the payload
+    if (reply_length > MAX_MSG_LEN) {
+      log_error("Got reply length %d, which is too long\n", reply_length);
+      close(peer_socket);
+      return;
+    }
     char payload[reply_length + 1];
     compsys_helper_readnb(&state, msg_buf, reply_length);
     memcpy(payload, msg_buf, reply_length);
@@ -464,9 +504,10 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
       if (fp == 0) {
         log_error("Failed to open destination: %s\n", output_file_path);
         close(peer_socket);
+        return;
       }
 
-      uint32_t offset = this_block * (PATH_LEN - REPLY_HEADER_LEN);
+      uint32_t offset = this_block * (MAX_MSG_LEN - REPLY_HEADER_LEN);
       log_info("Block num: %d/%d (offset: %d)\n", this_block + 1, block_count,
                offset);
       log_info("Writing from %d to %d\n", offset, offset + reply_length);
@@ -490,6 +531,7 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
       if (file_hash[i] != total_hash[i]) {
         log_error("File hash does not match specified for %s\n",
                   output_file_path);
+
         close(peer_socket);
         return;
       }
@@ -559,12 +601,11 @@ void* client_thread(void* thread_args) {
 
   // Register the given user
   int status_code = -1;
-
   send_message(*peer_address, COMMAND_REGISTER, "\0", 0, &status_code);
 
   if (status_code != STATUS_OK) {
-    log_error("Unable to register with peer %s:%s\n", peer_address->ip,
-              peer_address->port);
+    log_error("Unable to register with peer %s:%s. Shutting down client...\n",
+              peer_address->ip, peer_address->port);
     return NULL;
   }
 
@@ -579,7 +620,7 @@ void* client_thread(void* thread_args) {
 
     // Scanf might be dangerous in a multithreaded environment.
     // But we currently don't see a better alternative that allows
-    // For the user to input a file name while the server is running.
+    // for the user to input a file name while the server is running.
     char buf[PATH_LEN];
     if (scanf("%127s", buf) < 0) {
       log_error("Unable to read user input.\n");
@@ -597,7 +638,6 @@ void* client_thread(void* thread_args) {
     // Try to retrieve file from network
     int file_found = 0;
     for (size_t i = 0; i < peer_count; i++) {
-      int status_code;
 
       PeerAddress_t* peer = network[i];
 
@@ -606,9 +646,24 @@ void* client_thread(void* thread_args) {
         continue;
       }
 
+      // Try to retrieve file from peer
+      int status_code = -1;
+      FilePath_t* file_path = malloc(sizeof(FilePath_t));
+      memcpy(file_path->path, buf, PATH_LEN);
+      if(retrieving_files_append(file_path) == -1) {
+        log_error("Failed to add file to retrieving files.\n");
+        break;
+      }
+
       send_message(*peer, COMMAND_RETREIVE, buf, strlen(buf), &status_code);
+
+      if(retrieving_files_remove(file_path) == -1) {
+        log_error("Failed to remove file from retrieving files.\n");
+        break;
+      }
+      // If we got a file, we can stop searching
       if (status_code == STATUS_OK) {
-        log_info("File %s found in peer %s:%s\n", buf, peer->ip, peer->port);
+        log_info("File %s gotten from peer %s:%s\n", buf, peer->ip, peer->port);
         file_found = 1;
         break;
       } else {
@@ -730,6 +785,12 @@ void handle_register(int connfd, PeerAddress_t peer) {
  */
 void handle_inform(PeerAddress_t* sender, char* request_body) {
   log_info("Got inform command from %s:%d\n", sender->ip, sender->port);
+
+  // Check if the request body has correct length
+  if (strlen(request_body) != IP_LEN + sizeof(int32_t)) {
+    log_error("Received peer has invalid length.\n");
+    return;
+  }
 
   // Convert the request body to a PeerAddress_t;
   int32_t port;
@@ -886,7 +947,8 @@ void handle_server_request(int connfd) {
   request_header.port    = ntohl(request_header.port);
   request_header.command = ntohl(request_header.command);
   request_header.length  = ntohl(request_header.length);
-  // Ensure the ip is null terminated. This should not override the last byte,
+
+  // Ensure the ip is null terminated. This will not override the last byte,
   // since the IP is defined to be at most 15 characters long.
   request_header.ip[IP_LEN - 1] = '\0';
 
@@ -904,14 +966,16 @@ void handle_server_request(int connfd) {
 
   // Validate if the response is coherent
   if (!is_valid_ip(peer.ip) || !is_valid_port(peer.port)) {
-    char* msg = "Given invalid IP or port";
+    char msg[] = "Given invalid IP or port";
     log_info("Received malformed request: %s\n", msg);
     send_error(connfd, STATUS_MALFORMED, msg, strlen(msg));
     return;
   }
+
+  // Retrieve and Inform commands must have a request body attached
   if (request_length <= 0 &&
       (command == COMMAND_RETREIVE || command == COMMAND_INFORM)) {
-    char* msg = "No request body was provided for command";
+    char msg[] = "No request body was provided for command";
     log_info("Received malformed request: %s (%d)\n", msg, command);
     send_error(connfd, STATUS_MALFORMED, msg, strlen(msg));
     return;
@@ -921,6 +985,7 @@ void handle_server_request(int connfd) {
   if (request_length > 0) {
     request_body = malloc(request_length + 1);
     compsys_helper_readn(connfd, request_body, request_header.length);
+    // Append null terminator to make handling easier.
     request_body[request_length] = '\0';
   }
 
@@ -937,10 +1002,13 @@ void handle_server_request(int connfd) {
       break;
     default:
       log_info("Received unknown request with command code: %d\n", command);
-
-      char* msg = "Got unknown request code";
+      char msg[] = "Got unknown command";
       send_error(connfd, STATUS_OTHER, msg, strlen(msg));
       break;
+  }
+
+  if (request_body != NULL) {
+    free(request_body);
   }
 }
 
@@ -1069,8 +1137,6 @@ int main(int argc, char** argv) {
 
   printf("My address: %s:%s\n", my_address->ip, my_address->port);
 
-  retrieving_files = malloc(file_count * sizeof(FilePath_t*));
-
   network = (PeerAddress_t**)malloc(sizeof(PeerAddress_t*));
 
   // Copy over our own address to the network, so we do not free my_address
@@ -1101,7 +1167,7 @@ int main(int argc, char** argv) {
 
   // Free network
   free_network();
-  free(retrieving_files);
+  free_retrieving_files();
   free(my_address);
 
   // Free mutexes
