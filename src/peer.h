@@ -48,7 +48,7 @@ ReplyHeader_t create_header(uint32_t status, uint32_t this_block, uint32_t block
 
 void handle_register(int connfd, PeerAddress_t peer);
 
-void handle_inform(PeerAddress_t* sender, char* request_body);
+void handle_inform(PeerAddress_t* sender, char* request_body, size_t request_size);
 
 void handle_retrieve(int connfd, PeerAddress_t* sender, char* file_name);
 

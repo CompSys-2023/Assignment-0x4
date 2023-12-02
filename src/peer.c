@@ -35,6 +35,32 @@ int listenfd = -1;
 
 int shutdown_flag = 0;
 
+int simulated_server_latency = 0;
+
+//Mutex used to atomically set and read the shutdown flag
+pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Helper function to atomically send set an internal flag to shut down the server thread
+void send_shutdown_signal() {
+  pthread_mutex_lock(&shutdown_mutex);
+
+  shutdown_flag = 1;
+  // Shutdown the server thread
+  shutdown(listenfd, SHUT_RD);
+
+  pthread_mutex_unlock(&shutdown_mutex);
+}
+
+// Helper function to read the shutdown flag atomically
+int should_shutdown() {
+  pthread_mutex_lock(&shutdown_mutex);
+
+  int flag = shutdown_flag;
+
+  pthread_mutex_unlock(&shutdown_mutex);
+  return flag;
+}
+
 // HELPER FUNCTIONS FOR NETWORK //
 int network_resize(size_t new_size) {
   pthread_mutex_lock(&network_mutex);
@@ -226,7 +252,6 @@ int retrieving_files_remove(FilePath_t* file_path) {
   size_t found_index = 0;
 
   for (size_t i = 0; i < file_count; ++i) {
-    printf("Comparing %s to %s\n", retrieving_files[i]->path, file_path->path);
     FilePath_t* fp = retrieving_files[i];
 
     if (strcmp(fp->path, file_path->path) == 0) {
@@ -380,6 +405,13 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
   // Setup connection
   int peer_socket =
       compsys_helper_open_clientfd(peer_address.ip, peer_address.port);
+
+  if (peer_socket == -1) {
+    log_error("Failed to connect to peer %s:%s\n", peer_address.ip,
+              peer_address.port);
+    return;
+  }
+
   compsys_helper_readinitb(&state, peer_socket);
 
   // Construct a request message and send it to the peer
@@ -606,12 +638,14 @@ void* client_thread(void* thread_args) {
   if (status_code != STATUS_OK) {
     log_error("Unable to register with peer %s:%s. Shutting down client...\n",
               peer_address->ip, peer_address->port);
+    send_shutdown_signal();
+
     return NULL;
   }
 
   log_info("Client thread started!\n");
 
-  while (shutdown_flag == 0) {
+  while (!should_shutdown()) {
     pthread_mutex_lock(&stdout_mutex);
 
     printf("What file do you want to get?\n");
@@ -629,9 +663,7 @@ void* client_thread(void* thread_args) {
 
     if (strcmp(buf, "quit") == 0) {
       log_info("Quitting client...\n");
-      shutdown_flag = 1;
-      // Shutdown the server thread
-      shutdown(listenfd, SHUT_RD);
+      send_shutdown_signal();
       break;
     }
 
@@ -767,8 +799,8 @@ void handle_register(int connfd, PeerAddress_t peer) {
     char payload[IP_LEN + sizeof(int32_t)] = {0};
     int  net_register_port = htonl((int32_t)atoi(register_peer->port));
 
-    log_info("Informing peer %s:%s of new peer %s:%d\n", peer->ip, peer->port,
-             register_peer->ip, net_register_port);
+    log_info("Informing peer %s:%s of new peer %s:%s\n", peer->ip, peer->port,
+             register_peer->ip, register_peer->port);
 
     // Assemble payload and send it
     memcpy(payload, register_peer->ip, IP_LEN);
@@ -783,12 +815,12 @@ void handle_register(int connfd, PeerAddress_t peer) {
  * Handle 'inform' type message as defined by the assignment text. These will
  * never generate a response, even in the case of errors.
  */
-void handle_inform(PeerAddress_t* sender, char* request_body) {
-  log_info("Got inform command from %s:%d\n", sender->ip, sender->port);
+void handle_inform(PeerAddress_t* sender, char* request_body, size_t request_size) {
+  log_info("Got inform command from %s:%s\n", sender->ip, sender->port);
 
   // Check if the request body has correct length
-  if (strlen(request_body) != IP_LEN + sizeof(int32_t)) {
-    log_error("Received peer has invalid length.\n");
+  if (request_size < IP_LEN + sizeof(int32_t)) {
+    log_error("Received peer has invalid length. len(request_body) = %d < %d\n", request_size, IP_LEN + PORT_LEN);
     return;
   }
 
@@ -837,7 +869,7 @@ void handle_inform(PeerAddress_t* sender, char* request_body) {
  * always generate a response
  */
 void handle_retrieve(int connfd, PeerAddress_t* sender, char* request) {
-  log_info("Got retrieve command from %s:%d to get %s\n", sender->ip,
+  log_info("Got retrieve command from %s:%s to get %s\n", sender->ip,
            sender->port, request);
 
   // Check if the request is too long
@@ -926,6 +958,20 @@ void send_error(int connfd, int status, char* errmsg, size_t msg_size) {
 
 void send_reply(int connfd, ReplyHeader_t header, void* data,
                 size_t data_size) {
+  // If the user has set simulated_server_latency > 0, we will simulate server
+  // latency by sleeping for an amount of time.
+  if(simulated_server_latency > 0) {
+    log_info("Simulating server latency of %dms\n", simulated_server_latency);
+
+    // usleep takes microseconds, so we multiply by 1000 to get milliseconds
+    int status = usleep(simulated_server_latency * 1000);
+
+    // If we were unable to sleep for whatever reason, we should log an error
+    if(status != 0) {
+      log_error("Failed to simulate server latency: %s\n", strerror(errno));
+    }
+  }
+
   // Attach payload to header
   size_t reply_size = sizeof(ReplyHeader_t) + data_size;
 
@@ -941,7 +987,7 @@ void send_reply(int connfd, ReplyHeader_t header, void* data,
  */
 void handle_server_request(int connfd) {
   RequestHeader_t request_header = {0};
-  compsys_helper_readn(connfd, &request_header, sizeof(request_header));
+  compsys_helper_readn(connfd, &request_header, sizeof(RequestHeader_t));
 
   // Decode the request header to host byte order
   request_header.port    = ntohl(request_header.port);
@@ -995,7 +1041,7 @@ void handle_server_request(int connfd) {
       handle_register(connfd, peer);
       break;
     case COMMAND_INFORM:
-      handle_inform(&peer, request_body);
+      handle_inform(&peer, request_body, request_length);
       break;
     case COMMAND_RETREIVE:
       handle_retrieve(connfd, &peer, request_body);
@@ -1023,8 +1069,7 @@ void* server_thread() {
   listenfd = compsys_helper_open_listenfd(my_address->port);
 
   if (listenfd < 0) {
-    printf("Could not open listening socket.\n");
-    printf("Error: %s\n", strerror(errno));
+    log_error("Failed to open listening socket: %s\n", strerror(errno));
     return NULL;
   }
 
@@ -1032,12 +1077,12 @@ void* server_thread() {
 
   log_info("Server thread started!\n");
 
-  while (shutdown_flag == 0) {
+  while (!should_shutdown()) {
     int connfd = accept(listenfd, NULL, NULL);
 
     if (connfd == -1) {
       // We do not want to log an error if the server is shutting down.
-      if (shutdown_flag == 1) {
+      if (should_shutdown()) {
         log_info("Server shutting down...\n");
         break;
       }
@@ -1078,9 +1123,16 @@ int main(int argc, char** argv) {
 
   // Users should call this script with a single argument describing what
   // config to use
-  if (argc != 2) {
-    fprintf(stderr, "Usage: %s <config file>\n", argv[0]);
+  if (argc > 3 || argc < 2) {
+    fprintf(stderr, "Usage: %s <config file> [optional]<simulated_server_latency_ms>\n", argv[0]);
     exit(EXIT_FAILURE);
+  }
+
+  if (argc == 3) {
+    simulated_server_latency = atoi(argv[2]);
+    log_info("Simulating server latency of %dms\n", simulated_server_latency);
+  } else {
+    simulated_server_latency = 0;
   }
 
   my_address = (PeerAddress_t*)malloc(sizeof(PeerAddress_t));
@@ -1090,11 +1142,11 @@ int main(int argc, char** argv) {
   // Read in configuration options. Should include a client_ip, client_port,
   // server_ip, and server_port
   char buffer[128];
-  fprintf(stderr, "Got config path at: %s\n", argv[1]);
+  log_info("Got config path at: %s\n", argv[1]);
   FILE* fp = fopen(argv[1], "r");
 
   if (fp == NULL) {
-    fprintf(stderr, ">> Failed to open config file\n");
+    log_error(">> Failed to open config file\n");
     exit(EXIT_FAILURE);
   }
 
@@ -1103,39 +1155,37 @@ int main(int argc, char** argv) {
       memcpy(&my_address->ip, &buffer[strlen(MY_IP)],
              strcspn(buffer, "\r\n") - strlen(MY_IP));
       if (!is_valid_ip(my_address->ip)) {
-        fprintf(stderr, ">> Invalid client IP: %s\n", my_address->ip);
+        log_error(">> Invalid client IP: %s\n", my_address->ip);
         exit(EXIT_FAILURE);
       }
     } else if (starts_with(buffer, MY_PORT)) {
       memcpy(&my_address->port, &buffer[strlen(MY_PORT)],
              strcspn(buffer, "\r\n") - strlen(MY_PORT));
       if (!is_valid_port(my_address->port)) {
-        fprintf(stderr, ">> Invalid client port: %s\n", my_address->port);
+        log_error(">> Invalid client port: %s\n", my_address->port);
         exit(EXIT_FAILURE);
       }
     } else if (starts_with(buffer, PEER_IP)) {
       memcpy(peer_address.ip, &buffer[strlen(PEER_IP)],
              strcspn(buffer, "\r\n") - strlen(PEER_IP));
       if (!is_valid_ip(peer_address.ip)) {
-        fprintf(stderr, ">> Invalid peer IP: %s\n", peer_address.ip);
+        log_error(">> Invalid peer IP: %s\n", peer_address.ip);
         exit(EXIT_FAILURE);
       }
     } else if (starts_with(buffer, PEER_PORT)) {
       memcpy(peer_address.port, &buffer[strlen(PEER_PORT)],
              strcspn(buffer, "\r\n") - strlen(PEER_PORT));
       if (!is_valid_port(peer_address.port)) {
-        fprintf(stderr, ">> Invalid peer port: %s\n", peer_address.port);
+        log_error(">> Invalid peer IP: %s\n", peer_address.ip);
         exit(EXIT_FAILURE);
       }
     }
   }
   fclose(fp);
 
-  srand(time(0));
-  // sprintf(my_address->port, "%d", rand() & 15000);
-  // strcpy(my_address->ip, "127.0.0.1");
+  srand(time(NULL));
 
-  printf("My address: %s:%s\n", my_address->ip, my_address->port);
+  log_info("My address: %s:%s\n", my_address->ip, my_address->port);
 
   network = (PeerAddress_t**)malloc(sizeof(PeerAddress_t*));
 
