@@ -37,10 +37,11 @@ int shutdown_flag = 0;
 
 int simulated_server_latency = 0;
 
-//Mutex used to atomically set and read the shutdown flag
+// Mutex used to atomically set and read the shutdown flag
 pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Helper function to atomically send set an internal flag to shut down the server thread
+// Helper function to atomically send set an internal flag to shut down the
+// server thread
 void send_shutdown_signal() {
   pthread_mutex_lock(&shutdown_mutex);
 
@@ -213,7 +214,7 @@ int retrieving_files_append(FilePath_t* file_path) {
   pthread_mutex_lock(&retrieving_mutex);
 
   // If the array is empty, we have to allocate memory for it
-  if(file_count == 0) {
+  if (file_count == 0) {
     retrieving_files = malloc(sizeof(FilePath_t*));
   }
 
@@ -679,17 +680,17 @@ void* client_thread(void* thread_args) {
       }
 
       // Try to retrieve file from peer
-      int status_code = -1;
-      FilePath_t* file_path = malloc(sizeof(FilePath_t));
+      int         status_code = -1;
+      FilePath_t* file_path   = malloc(sizeof(FilePath_t));
       memcpy(file_path->path, buf, PATH_LEN);
-      if(retrieving_files_append(file_path) == -1) {
+      if (retrieving_files_append(file_path) == -1) {
         log_error("Failed to add file to retrieving files.\n");
         break;
       }
 
       send_message(*peer, COMMAND_RETREIVE, buf, strlen(buf), &status_code);
 
-      if(retrieving_files_remove(file_path) == -1) {
+      if (retrieving_files_remove(file_path) == -1) {
         log_error("Failed to remove file from retrieving files.\n");
         break;
       }
@@ -815,12 +816,14 @@ void handle_register(int connfd, PeerAddress_t peer) {
  * Handle 'inform' type message as defined by the assignment text. These will
  * never generate a response, even in the case of errors.
  */
-void handle_inform(PeerAddress_t* sender, char* request_body, size_t request_size) {
+void handle_inform(PeerAddress_t* sender, char* request_body,
+                   size_t request_size) {
   log_info("Got inform command from %s:%s\n", sender->ip, sender->port);
 
   // Check if the request body has correct length
   if (request_size < IP_LEN + sizeof(int32_t)) {
-    log_error("Received peer has invalid length. len(request_body) = %d < %d\n", request_size, IP_LEN + PORT_LEN);
+    log_error("Received peer has invalid length. len(request_body) = %d < %d\n",
+              request_size, IP_LEN + PORT_LEN);
     return;
   }
 
@@ -960,14 +963,14 @@ void send_reply(int connfd, ReplyHeader_t header, void* data,
                 size_t data_size) {
   // If the user has set simulated_server_latency > 0, we will simulate server
   // latency by sleeping for an amount of time.
-  if(simulated_server_latency > 0) {
+  if (simulated_server_latency > 0) {
     log_info("Simulating server latency of %dms\n", simulated_server_latency);
 
     // usleep takes microseconds, so we multiply by 1000 to get milliseconds
     int status = usleep(simulated_server_latency * 1000);
 
     // If we were unable to sleep for whatever reason, we should log an error
-    if(status != 0) {
+    if (status != 0) {
       log_error("Failed to simulate server latency: %s\n", strerror(errno));
     }
   }
@@ -1124,7 +1127,9 @@ int main(int argc, char** argv) {
   // Users should call this script with a single argument describing what
   // config to use
   if (argc > 3 || argc < 2) {
-    fprintf(stderr, "Usage: %s <config file> [optional]<simulated_server_latency_ms>\n", argv[0]);
+    fprintf(stderr,
+            "Usage: %s <config file> [optional]<simulated_server_latency_ms>\n",
+            argv[0]);
     exit(EXIT_FAILURE);
   }
 
