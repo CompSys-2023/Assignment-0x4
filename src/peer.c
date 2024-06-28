@@ -126,16 +126,17 @@ int network_append(PeerAddress_t* peer) {
   }
 
   // Resize the network to fit the new peer.
+  pthread_mutex_lock(&network_mutex);
   size_t new_size = peer_count + 1;
+  pthread_mutex_unlock(&network_mutex);
+  
   if (network_resize(new_size) == -1) {
     return -1;
   }
 
   pthread_mutex_lock(&network_mutex);
-
   // Update the network with the new peer.
   network[peer_count - 1] = peer;
-
   pthread_mutex_unlock(&network_mutex);
   return 1;
 }
